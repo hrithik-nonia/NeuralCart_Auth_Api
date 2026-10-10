@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Request, Response
 from app.models.user import UserRegister, UserLoginResponse, UserLoginInput, LoginResponse, LoginUser
 from app.utils.password_service import password_service
-from app.database import users_collection
+from app.database import users_collection, refresh_tokens_collection
 from app.utils.otp_and_email_service import otp_and_email_service
 from app.redis import redis_client
 import json
@@ -10,6 +10,8 @@ from app.utils.limiter import limiter
 from pymongo.errors import DuplicateKeyError
 from datetime import datetime, timezone
 from app.utils.jwt_helper import jwt_service, ACCESS_MIN
+from bson import ObjectId
+import jwt
 
 
 # created apirouter instance
@@ -157,6 +159,23 @@ async def login(request: Request,response: Response,  user_data: UserLoginInput)
   access_token = jwt_service.create_access_token(user_id, user["role"])
   refresh_token = jwt_service.create_refresh_token(user_id, user["role"])
   
+  # ✅ JTI nikalo
+  refresh_payload = jwt_service.decode(refresh_token, expected_type="refresh")
+  
+  # ✅ Refresh token data — quotes fix kiye
+  refresh_token_data = {
+      "user_id": user["_id"],
+      "jti": refresh_payload["jti"],
+      "is_revoked": False,
+      "expires_at": datetime.fromtimestamp(
+          refresh_payload["exp"], tz=timezone.utc
+      ),
+      "created_at": datetime.now(timezone.utc)
+  }
+  
+  # ✅ DB mein save karo
+  await refresh_tokens_collection.insert_one(refresh_token_data)
+  
   # refresh token httpOnly cookie me
   response.set_cookie(
       "refresh_token", refresh_token,
@@ -171,4 +190,96 @@ async def login(request: Request,response: Response,  user_data: UserLoginInput)
   )
   
   
+# Refresh Token End Point
+@router.post("/refrest", status_code= status.HTTP_200_OK)
+@limiter.limit("5/15minute")
+async def refresh(request: Request, response: Response):
+  # 1. Cookie se refresh token lo
+  refresh_token = request.cookies.get("refresh_token")
+  if not refresh_token:
+      raise HTTPException(
+          status_code=status.HTTP_401_UNAUTHORIZED,
+          detail="Refresh token missing"
+      )
+    
+  # 2. Token verify karo + expiry check
+  try:
+      payload = jwt_service.decode(refresh_token, expected_type="refresh")
+  except jwt.ExpiredSignatureError:
+      raise HTTPException(
+          status_code=status.HTTP_401_UNAUTHORIZED,
+          detail="Refresh token expire ho gaya"
+      )
+  except jwt.InvalidTokenError:
+      raise HTTPException(
+          status_code=status.HTTP_401_UNAUTHORIZED,
+          detail="Invalid refresh token"
+      )
+  
+  # 3. User ID nikalo
+  user_id = payload.get("sub")
+  jti = payload.get("jti")  # token ki unique id
+  
+  
+  # 4. DB mein token validate karo
+  stored_token = await refresh_tokens_collection.find_one({
+      "user_id": ObjectId(user_id),
+      "jti": jti,
+      "is_revoked": False
+  })
+  if not stored_token:
+      raise HTTPException(
+          status_code=status.HTTP_401_UNAUTHORIZED,
+          detail="Token revoked ya exist nahi karta"
+      )
+  
+  # 5. User check karo
+  user = await users_collection.find_one({"_id": ObjectId(user_id)})
+  if not user or not user.get("is_active"):
+      raise HTTPException(
+          status_code=status.HTTP_401_UNAUTHORIZED,
+          detail="User nahi mila ya inactive hai"
+      )
+  
+  
+  # 6. Naye tokens banao
+  new_access_token = jwt_service.create_access_token(user_id, user["role"])
+  new_refresh_token = jwt_service.create_refresh_token(user_id, user["role"])
+  
+  # 7. Naye refresh token ka payload decode karo — jti chahiye
+  new_refresh_payload = jwt_service.decode(new_refresh_token, expected_type="refresh")
+
+  # 8. Purana token revoke karo, naya save karo
+  await refresh_tokens_collection.update_one(
+      {"jti": jti},
+      {"$set": {"is_revoked": True}}
+  )
+  await refresh_tokens_collection.insert_one({
+      "user_id": ObjectId(user_id),
+      "jti": new_refresh_payload["jti"],
+      "is_revoked": False,
+      "expires_at": datetime.fromtimestamp(
+          new_refresh_payload["exp"], tz=timezone.utc
+      ),
+      "created_at": datetime.now(timezone.utc)
+  })
+  
+  
+  # 9. Cookie mein naya refresh token set karo
+  response.set_cookie(
+      key="refresh_token",
+      value=new_refresh_token,
+      httponly=True,
+      secure=False,    # Production mein True
+      samesite="lax",
+      max_age=7 * 24 * 60 * 60  # 7 days
+  )
+
+  return {
+      "access_token": new_access_token,
+      "token_type": "bearer"
+  }
+  
+
+
   

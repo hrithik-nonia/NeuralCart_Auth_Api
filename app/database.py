@@ -15,8 +15,14 @@ DATABASE_NAME = os.getenv("DATABASE_NAME")
 #     .replace("<db_password>", MONGODB_PASSWORD)
 # )
 
-client = AsyncIOMotorClient(MONGODB_URI)
+client = AsyncIOMotorClient(MONGODB_URI,
+                            maxPoolSize=50,
+                            minPoolSize=10,
+                            maxIdleTimeMS=60000,
+                            serverSelectionTimeoutMS=5000
+                            )
 
 database = client[DATABASE_NAME]
 
 users_collection = database["users"]
+refresh_tokens_collection = database["refresh_tokens"]

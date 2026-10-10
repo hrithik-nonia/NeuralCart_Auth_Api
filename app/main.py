@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from app.routes.auth import router as auth_router
 from contextlib import asynccontextmanager
-from app.database import client, users_collection
+from app.database import client, users_collection, refresh_tokens_collection
 from app.utils.limiter import limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
@@ -17,8 +17,21 @@ async def lifespan(app: FastAPI):
   # await redis_client.ping()
   print("✅ Redis connected")
 
-  # Index banao
+  # Email Ko Index Banaya
   await users_collection.create_index("email", unique=True)
+  
+  # User Id Aur Jit Ko Index Banaya
+  await refresh_tokens_collection.create_index(
+      [("user_id", 1), ("jti", 1)],
+      unique=True
+  )
+  
+  # TTL for refresh token 
+  await refresh_tokens_collection.create_index(
+        "expires_at",
+        expireAfterSeconds=0
+    )
+    
 
   yield
 
