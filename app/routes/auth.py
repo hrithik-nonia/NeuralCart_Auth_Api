@@ -1,10 +1,15 @@
-from fastapi import APIRouter, HTTPException, status
-from app.models.user import UserRegister
+from fastapi import APIRouter, HTTPException, status, Request, Response
+from app.models.user import UserRegister, UserLoginResponse, UserLoginInput, LoginResponse, LoginUser
 from app.utils.password_service import password_service
 from app.database import users_collection
 from app.utils.otp_and_email_service import otp_and_email_service
 from app.redis import redis_client
 import json
+import hmac
+from app.utils.limiter import limiter
+from pymongo.errors import DuplicateKeyError
+from datetime import datetime, timezone
+from app.utils.jwt_helper import jwt_service, ACCESS_MIN
 
 
 # created apirouter instance
@@ -15,7 +20,8 @@ router = APIRouter(
 
 # Register End Point
 @router.post("/register", status_code= status.HTTP_200_OK)
-async def register(user_data: UserRegister):
+@limiter.limit("5/minute")
+async def register(request: Request, user_data: UserRegister):
   # check user hai ya nahi
   is_user = await users_collection.find_one(
       {"email": user_data.email},
@@ -48,9 +54,13 @@ async def register(user_data: UserRegister):
   
   # temp user
   temporary_user = {
+        "name":user_data.name,
         "email": user_data.email,
-        "hashed_password": password_service.hash_password(hashed_password),
-        "otp": otp
+        "hashed_password": hashed_password,
+        "otp": otp,
+        "role": "user",
+        "google_id": None,
+        "attempts": 0
     }
   
   # save temp data on redis
@@ -61,3 +71,104 @@ async def register(user_data: UserRegister):
     )
   
   return {"message": "Otp Sended"}
+
+
+# Verify Otp End Point
+@router.post("/verify-otp", status_code= status.HTTP_200_OK)
+@limiter.limit("5/minute")
+async def verify_otp(request: Request, otp: int, email: str)-> UserLoginResponse:
+  # convert email into lower case
+  email = email.lower()
+  
+  # create redis key
+  redis_key = f"register:{email}"
+  
+  # get redis row data
+  raw = await redis_client.get(redis_key)
+  if not raw:
+    raise HTTPException(status_code= status.HTTP_400_BAD_REQUEST, detail="OTP expired or invalid")
+  
+  
+  # convert row data into json data
+  data = json.loads(raw)
+  
+  # attempts limit
+  if data.get("attempts", 0) >= 5:
+      await redis_client.delete(redis_key)
+      raise HTTPException(status_code= status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many attempts, register again")
+    
+  # otp match
+  if not hmac.compare_digest(str(data["otp"]), str(otp)):
+    data["attempts"] = data.get("attempts", 0) + 1
+    await redis_client.set(redis_key, json.dumps(data), keepttl=True)
+    raise HTTPException(status_code= status.HTTP_400_BAD_REQUEST, detail= "Invalid OTP")
+  
+  # sahi otp: pehle Redis se hatao
+  await redis_client.delete(redis_key)
+  
+  # insert data from db
+  try:
+    await users_collection.insert_one({
+        "name": data["name"],
+        "email": data["email"],
+        "password": data["hashed_password"],
+        "role": data["role"],
+        "is_active": True,
+        "google_id": data["google_id"],
+        "created_at": datetime.now(timezone.utc),
+    })
+  except DuplicateKeyError:
+        raise HTTPException(status_code= status.HTTP_400_BAD_REQUEST, detail= "User already exists")
+      
+  return UserLoginResponse(
+      message="Account verified",
+      name=data["name"],
+      email=data["email"],
+  )
+  
+  
+# Login End Point
+@router.post("/login", status_code= status.HTTP_200_OK)
+@limiter.limit("5/minute")
+async def login(request: Request,response: Response,  user_data: UserLoginInput)-> LoginResponse:
+  # user + password hash dono lo
+  user = await users_collection.find_one(
+      {"email": user_data.email},
+      {"name": 1, "email": 1, "password": 1, "role": 1, "is_active": 1},
+  )
+  
+  
+  # user ye pass missing
+  if not user or not user.get("password"):
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+  
+
+  # password chack
+  if not password_service.verify_password(
+      user_data.password, user["password"]
+  ):
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+  if not user.get("is_active", True):
+      raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Account disabled")
+      
+      
+  user_id = str(user["_id"])
+  access_token = jwt_service.create_access_token(user_id, user["role"])
+  refresh_token = jwt_service.create_refresh_token(user_id, user["role"])
+  
+  # refresh token httpOnly cookie me
+  response.set_cookie(
+      "refresh_token", refresh_token,
+      httponly=True, secure=False,  # production me True
+      samesite="lax", max_age=7 * 24 * 3600, path="/auth",
+  )
+  
+  return LoginResponse(
+      access_token=access_token,
+      expires_in=ACCESS_MIN * 60,
+      user=LoginUser(name=user["name"], email=user["email"]),
+  )
+  
+  
+  
