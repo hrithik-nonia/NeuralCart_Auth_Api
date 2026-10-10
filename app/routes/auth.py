@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Request, Response
+from fastapi import APIRouter, HTTPException, status, Request, Response, Depends
 from app.models.user import UserRegister, UserLoginResponse, UserLoginInput, LoginResponse, LoginUser
 from app.utils.password_service import password_service
 from app.database import users_collection, refresh_tokens_collection
@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from app.utils.jwt_helper import jwt_service, ACCESS_MIN
 from bson import ObjectId
 import jwt
+from app.utils.dependencies import get_current_user
+
 
 
 # created apirouter instance
@@ -280,6 +282,58 @@ async def refresh(request: Request, response: Response):
       "token_type": "bearer"
   }
   
+  
+# Logout End Point
+@router.post("/logout", status_code= status.HTTP_200_OK)
+@limiter.limit("5/15minute")
+async def logout(request: Request, response: Response):
+  # 1. Cookie se refresh token lo
+  refresh_token = request.cookies.get("refresh_token")
+  if not refresh_token:
+      raise HTTPException(
+          status_code=status.HTTP_401_UNAUTHORIZED,
+          detail="Refresh token missing"
+      )
+      
+  if refresh_token:
+    # 2. Token verify karo
+    try:
+        payload = jwt_service.decode(
+            refresh_token,
+            expected_type="refresh"
+        )
+    except jwt.InvalidTokenError:
+        payload = None
+  
+    # 3. Valid token hai to DB se delete karo
+    if payload:
+        user_id = payload.get("sub")
+        jti = payload.get("jti")
+
+        if user_id and jti:
+            await refresh_tokens_collection.delete_one({
+                "user_id": ObjectId(user_id),
+                "jti": jti
+            })
+            
+  # 4. Cookie clear karo
+    response.delete_cookie(
+        key="refresh_token",
+        httponly=True,
+        secure=False,  # Production mein True
+        samesite="lax",
+        path="/"
+    )
+    
+  return {
+        "message": "Logged out successfully"
+    }
 
 
+# Get User End Point
+@router.get("/get-me", status_code= status.HTTP_200_OK)
+@limiter.limit("5/minute")
+@router.get("/me")
+async def read_me(request: Request, current_user: dict = Depends(get_current_user)):
+    return {"id": str(current_user["_id"]), "email": current_user["email"]}
   
