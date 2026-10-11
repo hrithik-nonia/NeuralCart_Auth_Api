@@ -6,6 +6,7 @@ from app.utils.limiter import limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 from app.redis import redis_client, shared_redis
+from app.routes.oauth import router as oauth_router
 
 # lifespan
 @asynccontextmanager
@@ -59,6 +60,7 @@ app.add_exception_handler(
 
 # include auth router
 app.include_router(auth_router)
+app.include_router(oauth_router, prefix="/auth")
 
 # test route
 @app.get("/health")
