@@ -5,6 +5,7 @@ from app.database import client, users_collection, refresh_tokens_collection
 from app.utils.limiter import limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
+from app.redis import redis_client, shared_redis
 
 # lifespan
 @asynccontextmanager
@@ -13,9 +14,13 @@ async def lifespan(app: FastAPI):
   await client.admin.command("ping")
   print("✅ MongoDB connected")
 
-  # Redis connect
-  # await redis_client.ping()
-  print("✅ Redis connected")
+  # Auth Redis (Upstash)
+  await redis_client.ping()
+  print("✅ Auth Redis connected")
+
+  # Shared Redis (Docker)
+  await shared_redis.ping()
+  print("✅ Shared Redis connected")
 
   # Email Ko Index Banaya
   await users_collection.create_index("email", unique=True)
@@ -37,7 +42,8 @@ async def lifespan(app: FastAPI):
 
   # Cleanup
   client.close()
-  # await redis_client.close()
+  await redis_client.close()
+  await shared_redis.aclose()
   print("🔴 Connections closed")
 
 # create app instance
@@ -49,6 +55,7 @@ app.add_exception_handler(
     RateLimitExceeded,
     _rate_limit_exceeded_handler
 )
+
 
 # include auth router
 app.include_router(auth_router)

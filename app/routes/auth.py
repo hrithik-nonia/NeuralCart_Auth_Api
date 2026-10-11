@@ -3,7 +3,7 @@ from app.models.user import UserRegister, UserLoginResponse, UserLoginInput, Log
 from app.utils.password_service import password_service
 from app.database import users_collection, refresh_tokens_collection
 from app.utils.otp_and_email_service import otp_and_email_service
-from app.redis import redis_client
+from app.redis import redis_client, shared_redis
 import json
 import hmac
 from app.utils.limiter import limiter
@@ -182,8 +182,23 @@ async def login(request: Request,response: Response,  user_data: UserLoginInput)
   response.set_cookie(
       "refresh_token", refresh_token,
       httponly=True, secure=False,  # production me True
-      samesite="lax", max_age=7 * 24 * 3600, path="/auth",
+      samesite="lax", max_age=7 * 24 * 3600, path="/",
   )
+  
+  # Access token banne ke baad, return se pehle yeh add karo:
+  user_cache_data = {
+    "id": user_id,
+    "email": user["email"],
+    "name": user["name"],
+    "role": user["role"],
+    "is_active": user.get("is_active", True),
+    }
+  await shared_redis.setex(
+    f"user:{user_id}",
+    15 * 60,  # 15 min TTL (access token jitna)
+    json.dumps(user_cache_data)
+    )
+  
   
   return LoginResponse(
       access_token=access_token,
@@ -316,6 +331,9 @@ async def logout(request: Request, response: Response):
                 "jti": jti
             })
             
+            # Shared Redis se cache delete karo
+            await shared_redis.delete(f"user:{user_id}")
+            
   # 4. Cookie clear karo
     response.delete_cookie(
         key="refresh_token",
@@ -331,9 +349,11 @@ async def logout(request: Request, response: Response):
 
 
 # Get User End Point
-@router.get("/get-me", status_code= status.HTTP_200_OK)
+@router.get("/me", status_code= status.HTTP_200_OK)
 @limiter.limit("5/minute")
-@router.get("/me")
 async def read_me(request: Request, current_user: dict = Depends(get_current_user)):
-    return {"id": str(current_user["_id"]), "email": current_user["email"]}
+    return {
+        "id": current_user.get("id") or str(current_user.get("_id")),
+        "email": current_user["email"]
+    }
   
