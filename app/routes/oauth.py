@@ -27,6 +27,7 @@ async def google_login():
         "response_type": "code",
         "scope": "openid email profile",
         "access_type": "offline",
+        "prompt": "select_account", 
     }
     
     google_auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
@@ -134,7 +135,7 @@ async def google_callback(code: str, response: Response):
     from fastapi.responses import RedirectResponse
     # Frontend pe redirect karo access token ke saath
     redirect = RedirectResponse(
-        url=f"http://localhost:3000/oauth/callback?access_token={access_token}",
+        url=f"https://www.youtube.com?access_token={access_token}",
         status_code=302
     )
     redirect.set_cookie(
