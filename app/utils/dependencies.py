@@ -47,11 +47,13 @@ async def get_current_user(
     user_id = payload.get("sub")
     
     # user_id nikalne ke baad, DB query se pehle:
-    cached = await shared_redis.get(f"user:{user_id}")
+    user_id = payload.get("sub")
+    if user_id is None:           # ← pehle
+        raise credentials_exception
+
+    cached = await shared_redis.get(f"user:{user_id}")  # ← phir cache
     if cached:
         return json.loads(cached)
-    if user_id is None:
-        raise credentials_exception
     
     # Cache miss — DB se lo
     try:

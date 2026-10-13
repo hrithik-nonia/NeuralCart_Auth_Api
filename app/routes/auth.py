@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Request, Response, Depends
+from fastapi import APIRouter, HTTPException, status, Request, Response, Depends, Header
 from app.models.user import UserRegister, UserLoginResponse, UserLoginInput, LoginResponse, LoginUser
 from app.utils.password_service import password_service
 from app.database import users_collection, refresh_tokens_collection
@@ -13,6 +13,10 @@ from app.utils.jwt_helper import jwt_service, ACCESS_MIN
 from bson import ObjectId
 import jwt
 from app.utils.dependencies import get_current_user
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 
 
@@ -356,4 +360,33 @@ async def read_me(request: Request, current_user: dict = Depends(get_current_use
         "id": current_user.get("id") or str(current_user.get("_id")),
         "email": current_user["email"]
     }
-  
+
+
+# Verify User From DB
+@router.get("/internal/verify-user/{user_id}")
+async def verify_user(user_id: str, x_internal_key: str = Header(...)):
+    
+    if x_internal_key != os.getenv("INTERNAL_SECRET"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    user = await users_collection.find_one({"_id": ObjectId(user_id)})
+    if not user or not user.get("is_active"):
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user_data = {
+        "id": str(user["_id"]),
+        "email": user["email"],
+        "name": user["name"],
+        "role": user["role"],
+        "is_active": user["is_active"]
+    }
+    
+    # ← Redis mein dobara cache karo
+    await shared_redis.setex(
+        f"user:{user_id}",
+        15 * 60,
+        json.dumps(user_data)
+    )
+    
+    return user_data
+
